@@ -23,14 +23,25 @@ from xml.etree import ElementTree as ET
 # LET OP: deze URL is NIET getest. Open het Staatsblad in je browser,
 # kies een datum, en kijk of de link overeenkomt. Pas anders aan.
 # {datum} wordt vervangen door JJJJ-MM-DD.
-LIJST_URL = ("https://www.ejustice.just.fgov.be/cgi/list.pl"
-             "?language=nl&sum_date={datum}")
+# Het script probeert deze adressen in volgorde en neemt het eerste
+# dat een niet-lege pagina teruggeeft.
+LIJST_URLS = [
+    "https://www.ejustice.just.fgov.be/cgi/summary.pl?language=nl&sum_date={datum}",
+    "https://www.ejustice.just.fgov.be/cgi/list.pl?language=nl&sum_date={datum}",
+]
 
 DAGEN_TERUGKIJKEN = 7      # geen publicaties (weekend)? kijk tot X dagen terug
 MAX_ITEMS = 60             # zoveel items blijven in de feed
 ITEMS_BESTAND = "items.json"
 FEED_BESTAND = "feed.xml"
-USER_AGENT = "staatsblad-widget (persoonlijk gebruik, 1 aanvraag per dag)"
+HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                   "AppleWebKit/537.36 (KHTML, like Gecko) "
+                   "Chrome/124.0 Safari/537.36"),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "nl-BE,nl;q=0.9,en;q=0.8",
+    "Referer": "https://www.ejustice.just.fgov.be/",
+}
 
 # Alleen titels die met een van deze woorden beginnen komen erdoor.
 # Dat houdt benoemingen en bedrijfspublicaties buiten de feed.
@@ -69,10 +80,21 @@ class LinkVerzamelaar(HTMLParser):
 
 
 def haal_pagina(url):
-    req = Request(url, headers={"User-Agent": USER_AGENT})
-    with urlopen(req, timeout=30) as r:
-        ruw = r.read()
-        charset = r.headers.get_content_charset() or "utf-8"
+    laatste_fout = None
+    for poging in (1, 2):
+        try:
+            req = Request(url, headers=HEADERS)
+            with urlopen(req, timeout=60) as r:
+                ruw = r.read()
+                charset = r.headers.get_content_charset() or "utf-8"
+                print(f"   status {r.status}, {len(ruw)} bytes")
+            break
+        except Exception as fout:
+            laatste_fout = fout
+            print(f"   poging {poging} mislukt: {fout}")
+            time.sleep(3)
+    else:
+        raise laatste_fout
     for enc in (charset, "utf-8", "latin-1"):
         try:
             return ruw.decode(enc)
@@ -140,15 +162,23 @@ def main():
     vandaag = date.today()
     for terug in range(DAGEN_TERUGKIJKEN + 1):
         dag = (vandaag - timedelta(days=terug)).isoformat()
-        url = LIJST_URL.format(datum=dag)
-        try:
-            html = haal_pagina(url)
-        except Exception as fout:
-            print(f"[{dag}] ophalen mislukt: {fout}")
-            continue
+        html, url = "", None
+        for sjabloon in LIJST_URLS:
+            url = sjabloon.format(datum=dag)
+            print(f"[{dag}] {url}")
+            try:
+                html = haal_pagina(url)
+            except Exception as fout:
+                print(f"[{dag}] ophalen mislukt: {fout}")
+                continue
+            if len(html) > 500:
+                break
+            print(f"[{dag}] lege pagina, volgend adres proberen")
         if debug:
             with open(f"debug_{dag}.html", "w", encoding="utf-8") as f:
                 f.write(html)
+        if not html:
+            continue
         wetten = parse_wetten(html, url)
         print(f"[{dag}] {len(wetten)} wetten/besluiten gevonden")
         for w in wetten:
