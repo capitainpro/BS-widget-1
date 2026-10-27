@@ -2,25 +2,35 @@ name: Staatsblad feed
 
 on:
   schedule:
-    - cron: "0 6 * * 1-6"   # ma-za om 06:00 UTC
-  workflow_dispatch:         # handmatig starten kan ook
+    - cron: "0 5 * * *"     # elke dag om 05:00 UTC (06:00/07:00 in België)
+  workflow_dispatch:         # knop "Run workflow"
 
 permissions:
   contents: write
 
 jobs:
-  bouw:
+  feed:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python staatsblad_feed.py --debug
+
+      - name: Browser installeren
+        run: |
+          pip install playwright
+          playwright install --with-deps chromium
+
+      - name: Feed bijwerken
+        run: python staatsblad_feed.py --debug
+
       - name: Opslaan
         run: |
           git config user.name "feed-bot"
           git config user.email "feed-bot@users.noreply.github.com"
           git add -A
-          git commit -m "Update feed" || echo "Niets nieuws"
+          git commit -m "Update feed" || echo "Geen wijzigingen"
           git push
