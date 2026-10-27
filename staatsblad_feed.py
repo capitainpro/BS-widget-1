@@ -5,7 +5,8 @@ en maakt er een RSS-bestand (feed.xml) van voor je telefoon.
 Gebruik:  python staatsblad_feed.py          (normaal)
           python staatsblad_feed.py --debug  (bewaart de ruwe pagina)
 
-Alleen standaardbibliotheken, niets te installeren.
+Gebruikt een echte (onzichtbare) Chrome via Playwright, omdat het
+Staatsblad een JavaScript-controle heeft. Draait in GitHub Actions.
 """
 import json
 import re
@@ -14,7 +15,6 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from html.parser import HTMLParser
 from urllib.parse import urljoin
-from urllib.request import Request, urlopen
 from xml.etree import ElementTree as ET
 
 # ---------------------------------------------------------------
@@ -79,28 +79,22 @@ class LinkVerzamelaar(HTMLParser):
             self._href = None
 
 
-def haal_pagina(url):
-    laatste_fout = None
-    for poging in (1, 2):
+def haal_pagina(page, url):
+    """Opent de pagina in de browser en wacht tot de beveiligings-
+    controle (TSPD) voorbij is. Geeft de uiteindelijke HTML terug."""
+    page.goto(url, wait_until="domcontentloaded", timeout=60000)
+    for _ in range(8):
+        page.wait_for_timeout(4000)
         try:
-            req = Request(url, headers=HEADERS)
-            with urlopen(req, timeout=60) as r:
-                ruw = r.read()
-                charset = r.headers.get_content_charset() or "utf-8"
-                print(f"   status {r.status}, {len(ruw)} bytes")
-            break
-        except Exception as fout:
-            laatste_fout = fout
-            print(f"   poging {poging} mislukt: {fout}")
-            time.sleep(3)
-    else:
-        raise laatste_fout
-    for enc in (charset, "utf-8", "latin-1"):
-        try:
-            return ruw.decode(enc)
-        except (UnicodeDecodeError, LookupError):
-            continue
-    return ruw.decode("latin-1", errors="replace")
+            html = page.content()
+        except Exception:
+            continue       # de controle laadt de pagina net opnieuw
+        if "TSPD" not in html and len(html) > 500:
+            return html
+    try:
+        return page.content()
+    except Exception:
+        return ""
 
 
 def parse_wetten(html, basis_url):
@@ -159,6 +153,17 @@ def main():
     bekend = {i["link"] for i in items}
     nieuw = []
 
+    from playwright.sync_api import sync_playwright
+    pw = sync_playwright().start()
+    browser = pw.chromium.launch(
+        headless=True,
+        args=["--disable-blink-features=AutomationControlled"])
+    context = browser.new_context(
+        user_agent=HEADERS["User-Agent"], locale="nl-BE",
+        timezone_id="Europe/Brussels",
+        viewport={"width": 1366, "height": 850})
+    page = context.new_page()
+
     vandaag = date.today()
     for terug in range(DAGEN_TERUGKIJKEN + 1):
         dag = (vandaag - timedelta(days=terug)).isoformat()
@@ -167,13 +172,14 @@ def main():
             url = sjabloon.format(datum=dag)
             print(f"[{dag}] {url}")
             try:
-                html = haal_pagina(url)
+                html = haal_pagina(page, url)
             except Exception as fout:
                 print(f"[{dag}] ophalen mislukt: {fout}")
                 continue
-            if len(html) > 500:
+            if len(html) > 500 and "TSPD" not in html:
                 break
-            print(f"[{dag}] lege pagina, volgend adres proberen")
+            print(f"[{dag}] lege pagina of beveiligingscontrole, "
+                  "volgend adres proberen")
         if debug:
             with open(f"debug_{dag}.html", "w", encoding="utf-8") as f:
                 f.write(html)
@@ -189,6 +195,9 @@ def main():
         if wetten and terug > 0 and items:
             break          # voldoende teruggekeken
         time.sleep(2)      # vriendelijk blijven voor de server
+
+    browser.close()
+    pw.stop()
 
     items = (nieuw + items)[:MAX_ITEMS]
     bewaar_items(items)
